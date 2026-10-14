@@ -1,0 +1,141 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+LAYOUT_LEFT_RIGHT()
+
+title C4 Container Diagram — AdScale (TO-BE)
+
+' ====================== Tags ======================
+AddElementTag("new", $bgColor="#438DD5", $fontColor="#FFFFFF", $borderColor="##002AFA")
+AddElementTag("modified", $bgColor="#438DD5", $fontColor="#FFFFFF", $borderColor="#8С00FF")
+
+' ====================== Акторы и внешние системы ======================
+Person(advertiser, "Рекламодатель", "Управляет кампаниями, бюджетами и отчетностью")
+Person_Ext(endUser, "Пользователь сайта/приложения", "Запрашивает рекламу, видит баннер, кликает")
+System_Ext(dspPartner, "DSP-партнеры", "Отправляют bid requests и получают bid responses по OpenRTB")
+System_Ext(paymentGateway, "Платежный шлюз", "Обработка пополнения рекламных бюджетов")
+
+' ====================== AdScale система ======================
+System_Boundary(adScale, "AdScale система") {
+  Boundary(edge, "Слой API") {
+    Container(apiGateway, "API Gateway", "API Gateway / Envoy / NGINX", "Auth, rate limit, маршрутизация, circuit breaker, latency метрики", $tags="new")
+    Container(dashboard, "Advertiser Dashboard", "Web UI", "Управление кампаниями, бюджетами и отчетностью", $tags="modified")
+  }
+
+  Boundary(rtbPath, "RTB / Ad Delivery Path") {
+    Container(biddingService, "Bidding service", "C++ / Go", "Взвешивание ставок, бизнес-правила, расчет победителя аукциона", $tags="new")
+    Container(adServer, "Ad server", "C++ / Go", "Принимает HTTP-запросы, определяет пользователя, подбирает кандидатов в рекламу", $tags="modified")
+    Container(deliveryService, "Delivery service", "Node.js", "Формирует HTML/JS-разметку баннера и HTTP response", $tags="modified")
+    Container(budgetService, "Budget service", "Go", "Fast-track для проверки лимитов и доступного бюджета", $tags="new")
+    Container(redis, "Redis", "Redis DB", "Кэш горячих данных: кампании, таргетинг, бюджеты", $tags="new")
+  }
+
+  Boundary(domain, "Domain services") {
+    Container(campaignService, "Campaign service", "Go / Node.js", "Управление кампаниями и ставками, таргетинг, правила показов", $tags="new")
+    Container(eventProcessingService, "Event processing service", "Go / Python", "Прием событий кликов, показов и событий аукциона", $tags="new")
+    Container(statisticService, "Statistics service", "Python / Go", "Агрегация событий и статистика", $tags="new")
+    Container(analyticsService, "Analytics service", "Python", "Отчеты, аналитика, витрина данных", $tags="new")
+    Container(financialService, "Financial service", "Go", " Счета, балансы, сверки, списания, защита от перерасхода", $tags="new")
+  }
+
+  Boundary(streaming, "Event streaming") {
+    ContainerQueue(kafka, "Kafka Cluster", "Kafka", "Передача событий показов и кликов; событий аукциона, domain событий", $tags="new")
+  }
+
+  Boundary(stores, "Data Bases") {
+    ContainerDb(biddingDb, "Bidding DB", "PostgreSQL", "Данные для сервиса ставок ", $tags="new")
+    ContainerDb(statisticsDb, "Statistics DB", "ClickHouse", "Агрегированные события", $tags="new")
+    ContainerDb(analyticsDb, "Analytics DB", "ClickHouse", "Витрин для отчетов", $tags="new")
+    ContainerDb(campaignDb, "Campaign DB", "PostgreSQL", "Кампании, ставки, таргетинг и бизнес-правил", $tags="new")
+    ContainerDb(financeDb, "Finance DB", "PostgreSQL", "Балансы, счета, финансовые операции", $tags="new")
+    ContainerDb(budgetDb, "Budget DB", "PostgreSQL", "Лимиты, резервы и состояние бюджетов", $tags="new")
+  }
+
+  Boundary(platform, "Platform") {
+    Container(k8s, "Kubernetes", "K8s", "Контейнеризация, оркестрация, HPA, управляемые deploy и rollback", $tags="new")
+    Container(cicd, "CI/CD Pipeline", "CI/CD", "Автоматические deploy и rollback, проверка миграций и контрактов", $tags="new")
+    Container(observability, "Observability Stack", "Metrics / Logs / Traces", "Метрики, логи, трейсы, алерты", $tags="new")
+  }
+
+}
+' ====================== Внешние связи ======================
+Rel(dspPartner, apiGateway, "Bid requests / responses", "HTTPS / OpenRTB")
+Rel(advertiser, dashboard, "Управляет кампаниями и бюджетами", "HTTPS")
+Rel(endUser, adServer, "HTTP-запрос на подбор рекламы", "HTTPS")
+Rel(deliveryService, endUser, "HTML/JS разметка баннера и HTTP response", "HTTPS")
+Rel(financialService, paymentGateway, "Пополнение бюджета", "HTTPS / REST")
+
+' ====================== RTB / Ad delivery path ======================
+Rel(apiGateway, adServer, "Маршрутизирует bid/ad request", "HTTP / gRPC")
+Rel(adServer, redis, "Читает targeting, кампании и ставки", "Redis protocol")
+Rel(adServer, campaignService, "Получает правила при cache miss", "gRPC")
+Rel(adServer, biddingService, "Передает кандидатов", "Internal / gRPC")
+Rel(biddingService, redis, "Читает hot data", "Redis protocol")
+Rel(biddingService, budgetService, "Проверяет лимиты бюджета", "gRPC / cached")
+Rel(biddingService, biddingDb, "Runtime config", "JDBC / KV")
+Rel(biddingService, kafka, "События аукциона", "Async")
+Rel(biddingService, deliveryService, "Передает победителя", "Internal / gRPC")
+Rel(deliveryService, apiGateway, "Bid response для DSP", "HTTPS / OpenRTB")
+Rel(deliveryService, eventProcessingService, "Регистрирует показы и клики", "Async / HTTP")
+
+' ====================== Dashboard and domain потоки ======================
+Rel(dashboard, campaignService, "CRUD кампаний, ставок, таргетинга", "HTTPS / REST")
+Rel(dashboard, financialService, "Балансы, счета, платежи", "HTTPS / REST")
+Rel(dashboard, analyticsService, "Отчеты и аналитика", "HTTPS / REST")
+
+Rel(campaignService, campaignDb, "Читает и пишет кампании (CRUD)", "JDBC")
+Rel(campaignService, redis, "Обновляет hot data", "Event-driven invalidation")
+Rel(campaignService, kafka, "Campaign changed", "Domain event")
+
+Rel(budgetService, budgetDb, "Лимиты и резервы бюджета (ACID)", "JDBC")
+Rel(budgetService, redis, "Кэширует бюджетные лимиты", "Redis protocol")
+
+Rel(financialService, financeDb, "Транзакции, балансы, счета (ACID)", "JDBC")
+Rel(financialService, budgetDb, "Сверка состояния бюджетов", "Async / JDBC")
+Rel(financialService, kafka, "Financial events", "Async")
+
+' ====================== Event processing ======================
+Rel(eventProcessingService, kafka, "Публикует показы, клики", "Async")
+Rel(kafka, statisticsService, "Поток событий", "Consumer group")
+Rel(kafka, analyticsService, "События для витрин", "Consumer group")
+Rel(statisticsService, statisticsDb, "Записывает агрегаты", "ClickHouse Native / Batch")
+Rel(analyticsService, analyticsDb, "Строит витрины", "ClickHouse Native")
+
+' ====================== Observability and delivery ======================
+Rel(apiGateway, observability, "RPS, latency, error rate", "Metrics")
+Rel(adServer, observability, Latency and errors для подбора кандидатов", "Metrics / traces")
+Rel(biddingService, observability, "P95/P99, timeouts, cache hit ratio", "Metrics / traces")
+Rel(deliveryService, observability, "Response render latency and errors", "Metrics / traces")
+Rel(kafka, observability, "Lag, throughput, consumer errors", "Metrics")
+Rel(campaignDb, observability, "Locks, slow queries, сатурация БД", "Metrics")
+Rel(cicd, k8s, "Deploys containers", "Rolling update / rollback")
+
+' ====================== Notes ======================
+note left of adServer
+  Сохраняет функцию:
+  HTTP-запрос,
+  идентификация пользователя,
+  подбор кандидатов.
+end note
+
+note right of biddingService
+  Критичный hot path.
+  Цель: P95 <= 100 ms
+  DSP target: 80 ms
+end note
+
+note right of deliveryService
+  Сохраняет функцию:
+  HTML/JS разметка
+  и HTTP response.
+end note
+
+note right of kafka
+  Kafka отделяет события
+  клики/показы/аукциона
+  от RTB-пути.
+end note
+
+
+@enduml
