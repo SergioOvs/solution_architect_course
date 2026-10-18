@@ -7,50 +7,50 @@ Circuit Breaker реализован на стороне клиента для �
 
 ### Матрица применения и fallback-стратегии
 
-|      Клиент       |  Защищаемая зависимость  |      Уровень реализации       | Fallback при переходе в состояние OPEN                                          |
-|:-----------------:|:------------------------:|:-----------------------------:|:--------------------------------------------------------------------------------|
-|    API Gateway    |     Bidding Service      |     Envoy (конфигурация)      | HTTP 204 No Content (нормальный no-bid в OpenRTB)                               |
-|     Ad Server     |     Bidding Service      | gRPC-клиент (Resilience4j/Go) | Дефолтная ставка из Redis                                                       |
-|     Ad Server     |     Campaign Service     | gRPC-клиент (Resilience4j/Go) | Устаревшие данные кампании из Redis                                             |
-|  Bidding Service  |      Budget Service      | gRPC-клиент (Resilience4j/Go) | Кэшированные лимиты из Redis                                                    |
-|  Bidding Service  |        BiddingDB         | gRPC-клиент (Resilience4j/Go) | Конфигурация из Redis                                                           |
-|  Bidding Service  |      Redis Cluster       | gRPC-клиент (Resilience4j/Go) | Чтение из read-replica Campaign PostgreSQL                                      |
-|  Bidding Service  | Campaign DB read-replica | gRPC-клиент (Resilience4j/Go) | NO_BID с reason=STORAGE_UNAVAILABLE                                             |
-| Financial Service |      Платёжный шлюз      |       Логика приложения       | Повторная отправка в очередь с экспоненциальной задержкой (exponential backoff) |
-| Campaign Service  |     Financial (gRPC)     |          gRPC-клиент          | Возврат ошибки в UI                                                             |
+|      Клиент       |  Защищаемая зависимость  |      Уровень реализации       | Fallback при переходе в состояние OPEN                                                                                                       |
+|:-----------------:|:------------------------:|:-----------------------------:|:---------------------------------------------------------------------------------------------------------------------------------------------|
+|    API Gateway    |     Bidding Service      |     Envoy (конфигурация)      | HTTP 204 No Content (нормальный no-bid в OpenRTB)                                                                                            |
+|     Ad Server     |     Bidding Service      | gRPC-клиент (Resilience4j/Go) | Дефолтная ставка из Redis                                                                                                                    |
+|     Ad Server     |     Campaign Service     | gRPC-клиент (Resilience4j/Go) | Устаревшие данные кампании из Redis                                                                                                          |
+|  Bidding Service  |      Budget Service      | gRPC-клиент (Resilience4j/Go) | При ошибке, таймауте или CB=OPEN — немедленный NO_BID (BUDGET_SERVICE_UNAVAILABLE или BUDGET_INSUFFICIENT). Оптимистичный fallback запрещен. |
+|  Bidding Service  |        BiddingDB         | gRPC-клиент (Resilience4j/Go) | Конфигурация из Redis                                                                                                                        |
+|  Bidding Service  |      Redis Cluster       | gRPC-клиент (Resilience4j/Go) | Чтение из read-replica Campaign PostgreSQL                                                                                                   |
+|  Bidding Service  | Campaign DB read-replica | gRPC-клиент (Resilience4j/Go) | NO_BID с reason=STORAGE_UNAVAILABLE                                                                                                          |
+| Financial Service |      Платёжный шлюз      |       Логика приложения       | Повторная отправка в очередь с экспоненциальной задержкой (exponential backoff)                                                              |
+| Campaign Service  |     Financial (gRPC)     |          gRPC-клиент          | Возврат ошибки в UI                                                                                                                          |
 
 ### Рекомендуемые стандартные параметры
 
-Пороговые значения определяются по результатам нагрузочного тестирования. Для Redis в горячем пути пороги по задержке 
-значительно строже, чем для Campaign DB, так как даже кратковременное замедление Redis критично для соблюдения 
+Пороговые значения определяются по результатам нагрузочного тестирования. Для Redis в горячем пути пороги по задержке
+значительно строже, чем для Campaign DB, так как даже кратковременное замедление Redis критично для соблюдения
 P95 ≤ 100 мс.
 
 |      Параметр       | Значение | Описание                                                            |
 |:-------------------:|:--------:|:--------------------------------------------------------------------|
 |     window_size     |   10s    | Скользящее окно для анализа состояния                               |
 |  failure_threshold  |   50%    | Доля ошибок (по статусу или таймауту), при которой цепь размыкается |
-| slow_call_threshold |  100ms   | Запросы дольше этого времени считаются ошибочными (failure)         |
+| slow_call_threshold |   80ms   | Запросы дольше этого времени считаются ошибочными (failure)         |
 |    min_requests     |   100    | Минимальное число запросов в окне для принятия решения              |
 |    open_timeout     |    5s    | Время нахождения в состоянии OPEN до перехода в HALF-OPEN           |
 |  half_open_probes   |    5     | Количество пробных запросов для проверки восстановления             |
 |  success_threshold  |   80%    | Доля успешных пробных запросов для полного закрытия цепи            |
 
-### Операционные аспекты
 
+### Операционные аспекты
 * <b><i>Реализация:</i></b> В Bidding Service и Ad Server — на уровне gRPC-клиента (например, Resilience4j для Go). 
 В API Gateway — через таймауты и правила маршрутизации Envoy.
-* <b><i>Наблюдаемость:</i></b> Каждый переход цепи в состояние OPEN генерирует алерт для DevOps-команды и фиксируется 
+* <b><i>Наблюдаемость:</i></b> Каждый переход цепи в состояние OPEN генерирует алерт для DevOps-команды и фиксируется
 на дашбордах Grafana для визуализации деградации зависимостей.
 
 ## Переповторы с экспоненциальной задержкой
-<b>Главное правило:</b> Retry применяется только вне hot path аукциона. Внутри бюджета в 80–100 мс повторный запрос 
-неизбежно нарушит SLA. Если первая попытка синхронного вызова не удалась, срабатывает fail-fast через Circuit Breaker 
-с переходом в fallback. Retry не применяется к бизнес-ошибкам (`NO_BID`, `400 Bad Request`) и не используется, если 
+<b>Главное правило:</b> Retry применяется только вне hot path аукциона. Внутри бюджета в 80–100 мс повторный запрос
+неизбежно нарушит SLA. Если первая попытка синхронного вызова не удалась, срабатывает fail-fast через Circuit Breaker
+с переходом в fallback. Retry не применяется к бизнес-ошибкам (`NO_BID`, `400 Bad Request`) и не используется, если
 первая попытка уже заняла значительную часть дедлайна.
 
 <b>Обязательные условия:</b>
-* <b><i>Jitter обязателен:</i></b> Формула задержки delay(n) = min(base × 2^n, max_delay) × jitter (jitter ±20%). 
-Без случайного разброса тысячи клиентов одновременно повторят запрос после восстановления сервиса, 
+* <b><i>Jitter обязателен:</i></b> Формула задержки delay(n) = min(base × 2^n, max_delay) × jitter (jitter ±20%).
+Без случайного разброса тысячи клиентов одновременно повторят запрос после восстановления сервиса,
 вызвав retry-шторм (thundering herd).
 * <b><i>Комбинация с Circuit Breaker:</i></b> Повтор в открытый (OPEN) upstream усугубит каскадный отказ. Retry 
 разрешается только для вызовов в состоянии CLOSED или HALF-OPEN.
@@ -58,17 +58,22 @@ P95 ≤ 100 мс.
 
 ### Матрица применения Retry
 
-|              Вызов              |              Retry               | Обоснование                                                           |
-|:-------------------------------:|:--------------------------------:|:----------------------------------------------------------------------|
-|    API Gateway => Ad Server     |               Нет                | Суммарный дедлайн ≤ 80 мс, повтор не уложится                         |
-|  Ad Server => Bidding Service   |               Нет                | Hot path, распространение дедлайна                                    |
-|  Bidding => Redis / BiddingDB   |               Нет                | Вместо retry — Circuit Breaker + fallback в кэш                       |	
-|    Bidding => Budget Service    |             1 retry              | Кратковременный сбой возможен, одна попытка оправдана                 |
-| Campaign Service => Campaign DB |             3 retry              | Не hot path, транзакционная запись                                    |
-| Financial Service => Finance DB |             3 retry              | Финансовые операции требуют надёжной доставки (с idempotency key)     |
-|       Producers => Kafka        | Встроенный (idempotent producer) | 	Повтор до подтверждения; при длительной недоступности — local buffer |
-|       Kafka => Consumers        |         Повтор обработки         | При исчерпании попыток — отправка в DLQ                               |
-|   Financial => Платёжный шлюз   |     В фоне, длинное max-окно     | Далее эскалация на manual review                                      |
+|              Вызов              |              Retry               | Обоснование                                                          |
+|:-------------------------------:|:--------------------------------:|:---------------------------------------------------------------------|
+|    API Gateway => Ad Server     |               Нет                | Суммарный дедлайн ≤ 80 мс, повтор не уложится                        |
+|  Ad Server => Bidding Service   |               Нет                | Hot path, распространение дедлайна                                   |
+|  Bidding => Redis / BiddingDB   |               Нет                | Вместо retry — Circuit Breaker + fallback в кэш                      |	
+|    Bidding => Budget Service    |             1 retry              | Кратковременный сбой возможен, одна попытка оправдана<sup>1</sup>    |
+| Campaign Service => Campaign DB |             3 retry              | Не hot path, транзакционная запись                                   |
+| Financial Service => Finance DB |             3 retry              | Финансовые операции требуют надёжной доставки (с idempotency key)    |
+|       Producers => Kafka        | Встроенный (idempotent producer) | Повтор до подтверждения; при длительной недоступности — local buffer |
+|       Kafka => Consumers        |         Повтор обработки         | При исчерпании попыток — отправка в DLQ                              |
+|   Financial => Платёжный шлюз   |     В фоне, длинное max-окно     | Далее эскалация на manual review                                     |
+
+[<sup>1</sup>] <b>Ограничение:</b> Retry выполняется только если значение дедлайна (gRPC deadline), проброшенного 
+от API Gateway, позволяет уложиться в бюджет. Если оставшееся время (Current_Time - Request_Start_Time) составляет 
+менее <b>35 мс</b>, сервис должен немедленно вернуть <b>NO_BID</b> без выполнения повторной попытки. 
+Это гарантирует соблюдение общего дедлайна в 50 мс.
 
 ### Параметры экспоненциальной задержки
 
@@ -146,21 +151,23 @@ WHERE campaign_id = :campaign_id
 При недоступности зависимостей в RTB hot path система переходит на заранее определенные резервные стратегии. 
 Главная цель — продолжить обслуживание запросов с приемлемым качеством и соблюдением SLA, избегая полного отказа.
 
-|      Сервис      |    Недоступная зависимость    | Стратегия и источник данных                                     |              TTL/Лимиты               | Поведение при отсутствии fallback                                                             | Логирование и метрики                                                      |
-|:----------------:|:-----------------------------:|:----------------------------------------------------------------|:-------------------------------------:|:----------------------------------------------------------------------------------------------|:---------------------------------------------------------------------------|
-| Bidding Service  |           BiddingDB           | Чтение конфигурации из Redis `(bid:config:{campaign_id})`       |            Redis TTL: 60 с            | Дефолтные значения сервиса: `DEFAULT_BID_MULTIPLIER=1.0`, `DEFAULT_AUCTION_TYPE=SECOND_PRICE` | Лог: `fallback=redis`/`fallback=default`                                   |
-| Bidding Service  |        Budget Service         | Кэшированный бюджет из Redis `(budget:available:{campaign_id})` |            Redis TTL: 5 с             | Оптимистичный fallback: предположить, что бюджет есть                                         | Метрика: `bidding_budget_fallback_total`                                   |
-|    Ad Server     |        Bidding Service        | Дефолтная ставка из локального конфига Ad Server                |                   —                   | Если ставка ниже floor price — вернуть `NO_BID`                                               | —                                                                          |
-|    Ad Server     | Campaign Service (cache miss) | Устаревшие данные из Redis с пометкой `stale`                   | Redis TTL: 60 с + Grace period: 5 мин | Возврат ошибки (нарушает SLA партнёра)                                                        | Метрика: `adserver_campaign_cache_stale_total`                             |
-| Delivery Service |      Kafka (Event Sink)       | Локальный буфер в памяти процесса                               |         Лимит: 10 000 событий         | Событие теряется немедленно                                                                   | Метрики: `delivery_events_buffered_total`, `delivery_events_dropped_total` |
+|      Сервис      |    Недоступная зависимость    | Стратегия и источник данных                                                                                                                  |              TTL/Лимиты               | Поведение при отсутствии fallback                                                             | Логирование и метрики                                                      |
+|:----------------:|:-----------------------------:|:---------------------------------------------------------------------------------------------------------------------------------------------|:-------------------------------------:|:----------------------------------------------------------------------------------------------|:---------------------------------------------------------------------------|
+| Bidding Service  |           BiddingDB           | Чтение конфигурации из Redis `(bid:config:{campaign_id})`                                                                                    |            Redis TTL: 60 с            | Дефолтные значения сервиса: `DEFAULT_BID_MULTIPLIER=1.0`, `DEFAULT_AUCTION_TYPE=SECOND_PRICE` | Лог: `fallback=redis`/`fallback=default`                                   |
+| Bidding Service  |        Budget Service         | Budget Service распределяет порции бюджета в Redis. Bidding Service атомарно списывает квоту через Lua-скрипт. При отсутствии квоты — NO_BID |         — (Fallback запрещен)         | NO_BID                                                                                        | Метрика: `bidding_budget_reject_total`                                     |
+|    Ad Server     |        Bidding Service        | Дефолтная ставка из локального конфига Ad Server                                                                                             |                   —                   | Если ставка ниже floor price — вернуть `NO_BID`                                               | —                                                                          |
+|    Ad Server     | Campaign Service (cache miss) | Устаревшие данные из Redis с пометкой `stale`                                                                                                | Redis TTL: 60 с + Grace period: 5 мин | Возврат ошибки (нарушает SLA партнёра)                                                        | Метрика: `adserver_campaign_cache_stale_total`                             |
+| Delivery Service |      Kafka (Event Sink)       | Локальный буфер в памяти процесса                                                                                                            |         Лимит: 10 000 событий         | Событие теряется немедленно                                                                   | Метрики: `delivery_events_buffered_total`, `delivery_events_dropped_total` |
 
 ### Детализация критичных стратегий
 
 <b>Bidding Service: недоступен Budget Service (TTL 5 с)</b><br>
-Используется оптимистичный fallback — аукцион продолжается, предполагая наличие средств. Это допустимый риск: 
-вероятность перерасхода бюджета за 5 секунд при кратковременном сбое минимальна, а ложный отказ (`NO_BID`) обходится 
-дороже из-за потери выручки. При восстановлении Budget Service выполняется сверка (reconciliation) для коррекции
-отклонений.
+Оптимистичный fallback полностью исключен для предотвращения неконтролируемого перерасхода бюджета при 50 000 RPS.
+Введено атомарное резервирование: Bidding Service вызывает `ReserveBudget` в Budget Service.
+Если получен статус `409 Conflict`, `402 Payment Required`, `DEADLINE_EXCEEDED` или Circuit Breaker находится
+в состоянии `OPEN`, сервис немедленно возвращает `NO_BID`. При недоступности Budget Service (сетевая ошибка)
+также возвращается `NO_BID`. За 5 секунд TTL предыдущего кэша при нагрузке 50 000 RPS может пройти до 250 000 запросов;
+отсутствие жесткого резервирования создавало риск неконтролируемого списания
 
 <b>Ad Server: недоступен Campaign Service (Grace period 5 мин)</b><br>
 Redis хранит данные кампаний 60 секунд. При недоступности Campaign Service Ad Server продолжает использовать устаревший 

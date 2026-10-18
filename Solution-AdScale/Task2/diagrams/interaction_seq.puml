@@ -29,12 +29,16 @@ activate gtway
 			activate rds
 				rds --> biddingS: bid конфиги
 			deactivate rds
-			biddingS -> budgetS: gRPC CheckbudgetS(campaign_refs)
+			biddingS -> budgetS: gRPC ReserveBudget(campaign_refs, amount, idempotency_key)
 			activate budgetS
-				budgetS --> biddingS: доступные бюджеты
+				budgetS --> biddingS: 200 OK (Reserved)
 			deactivate budgetS
-			biddingS -> biddingS: Применение бизнес-правил, выбор победителя
-			biddingS --> adS: EvaluateResponse (winner)
+			alt Budget Reserved (200 OK)
+                biddingS -> biddingS: Применение бизнес-правил, выбор победителя
+                biddingS --> adS: EvaluateResponse (winner)
+            else Budget Failed (409/Timeout/CB Open)
+                biddingS --> adS: EvaluateResponse (NO_BID / REJECTED)
+            end
 		deactivate biddingS
 		adS -> deliveryS: gRPC Render(winner)
 		activate deliveryS
