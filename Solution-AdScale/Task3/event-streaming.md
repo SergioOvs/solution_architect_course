@@ -1,7 +1,7 @@
 # Потоковая обработка событий
 ## Роль Kafka в архитектуре AdScale
-В архитектуре AdScale Kafka выполняет роль единой шины данных, объединяющей потоковые события 
-и Change Data Capture (CDC).
+В архитектуре AdScale Kafka выполняет роль единой шины данных, объединяющей потоковые события и Change Data Capture
+(CDC).
 
 |                 Функция                  | Описание                                                                                                                                                                                                                         |
 |:----------------------------------------:|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -36,10 +36,18 @@
 |:-------------------:|:--------------------------------------------|:------------------:|:---------------------------------------|
 |  stats-aggregator   | ad.impressions, ad.clicks, auction.win-loss | Statistics Service | Bulk-агрегация в ClickHouse            |
 |  analytics-builder  | ad.impressions, ad.clicks, financial.events | Analytics Service  | Построение витрин (Materialized Views) |
-|   finance-settler   | auction.win-loss                            | Financial Service  | Списание бюджета за выигранный аукцион |
+|   finance-settler   | financial.events                            | Financial Service  | Списание бюджета за выигранный аукцион |
 |  budget-reconciler  | financial.events                            |   Budget Service   | Синхронизация балансов                 |
 |  cache-invalidator  | campaign.changed                            |    Cache Worker    | Удаление ключей из Redis               |
 | bidding-config-sync | campaign.changed                            |  Bidding Service   | Обновление конфигурации ставок         |
+
+## Гарантии подтверждений (Producer Config)
+Для топики `financial.events` установлены строгие гарантии доставки:
+* `acks=all`: Продюсер ждет подтверждения от всех брокеров, входящих в ISR (In-Sync Replica).
+* `min.insync.replicas=2`: Транзакция записи подтверждается только при фиксации на минимум двух узлах.
+* `enable.idempotence=true`: Исключение дублей на уровне продюсера.
+* `transactional.id`: Использование транзакций Kafka для атомарной записи события и обновления статуса 
+в Outbox (PostgreSQL).
 
 ## Мониторинг
 | Метрика                                    | Порог алерта                             |
