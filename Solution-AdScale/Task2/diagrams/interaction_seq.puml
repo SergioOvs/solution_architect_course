@@ -1,0 +1,60 @@
+@startuml
+title AdScale.RTB Hot Path
+
+actor "DSP Partner / User" as dsp
+participant "API gateway" as gtway
+participant "Ad Server" as adS
+database "Redis" as rds
+participant "Bidding Service" as biddingS
+participant "Budget Service" as budgetS
+participant "Delivery Service" as deliveryS
+participant "Event processing service" as evntPS
+queue "Kafka" as kfk
+
+
+autonumber
+dsp -> gtway: POST /openrtb/v2.5/bid
+activate gtway
+	gtway -> gtway: Auth, Rate Limit, Circuit Breaker
+	gtway -> adS: HTTP/gRPC (нормализованный bid request)
+	activate adS
+		adS -> rds: GET Данные по таргетингу и кампании
+		activate rds
+		rds --> adS: Данные по кампании
+		deactivate rds
+		adS -> adS: Подбор кандидатов в рекламу
+		adS -> biddingS: gRPC Evaluate(candidates)
+		activate biddingS
+			biddingS -> rds: MGET bid_multipliers, min_acceptable
+			activate rds
+				rds --> biddingS: bid конфиги
+			deactivate rds
+			biddingS -> budgetS: gRPC ReserveBudget(campaign_refs, amount, idempotency_key)
+			activate budgetS
+				budgetS --> biddingS: 200 OK (Reserved)
+			deactivate budgetS
+			alt Budget Reserved (200 OK)
+                biddingS -> biddingS: Применение бизнес-правил, выбор победителя
+                biddingS --> adS: EvaluateResponse (winner)
+            else Budget Failed (409/Timeout/CB Open)
+                biddingS --> adS: EvaluateResponse (NO_BID / REJECTED)
+            end
+		deactivate biddingS
+		adS -> deliveryS: gRPC Render(winner)
+		activate deliveryS
+			deliveryS -> deliveryS: Генерация HTML/JS
+			deliveryS --> adS: RenderResponse
+		deactivate deliveryS
+		adS --> gtway: HTTP Response
+	deactivate adS
+	gtway --> dsp: 200 OK (Bid Response)
+deactivate gtway
+
+== Event streaming ==
+deliveryS -> evntPS: HTTP POST (показы, клики)
+activate evntPS
+	evntPS -> kfk: Publish ad.impressions / ad.clicks
+deactivate evntPS
+biddingS -> kfk: Publish auction.win-loss
+
+@enduml
