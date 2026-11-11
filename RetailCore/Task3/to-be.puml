@@ -1,0 +1,68 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+
+Person(customer, "Клиент", "Оформляет заказ, выбирает промо, оплачивает")
+Person(support, "Оператор поддержки", "Корректирует статусы вручную")
+
+System_Boundary(monolith, "Монолитное ядро RetailCore A5‑15") {
+    Container(checkout, "Checkout / Order API", "Java/Spring", "Оформление заказа; расчёт цены, промо, выбор доставки. Fallback‑логика из legacy_promo_pkg.")
+    Container(payment, "Payment Gateway", "Java/Spring", "Синхронный вызов во время checkout. Узкое место под нагрузкой.")
+    Container(delivery, "Delivery Routing", "Java/Spring", "Выбор маршрута доставки. Правила разбросаны по Java-коду, таблицам Oracle и конфигурациям интеграционного слоя.")
+    Container(status, "Status Management", "Java/Spring", "Формально жизненный цикл описан, но фактическое поведение зависит от технических состояний.")
+    Container(reserve, "Резервирование товаров / Cancelation", "Java/Spring", "Логика частично живёт в пакетах Oracle.")
+    Container(db, "ORACLE OLTB", "Oracle", "SPOF. Хранилище данных, движок бизнес-правил, точка обмена данными. Содержит десятки ТБ исторических записей без архивации.")
+}
+
+System_Ext(partners, "Партнёрские площадки", "Маркетплейсы, склады, службы доставки")
+System_Ext(dotnet, ".NET Integration Service", "Интеграция через JMS вместо direct SQL")
+System_Ext(analytics, "Python Analytics jobs", "Нагружают оперативную базу напрямую (direct SQL). Отсутствует единый источник правды.")
+
+Container(promo, "Promo Microservice", "Java/Spring", "Расчёт скидок. При недоступности fallback‑логика в монолите. Публикует события OrderDiscounted.")
+Container(event_backbone, "Event Backbone", "Kafka / Broker", "Версионированная доставка событий; buffering и replay.")
+Container(outbox_relay, "Outbox Relay", "Java/Spring", "Transactional outbox рядом с владельцем записи; relay after commit.")
+Container(adapter, "Partner Adapter", "Java/Spring", "Перевод канонической команды в partner-specific контракт; idempotency key.")
+Container(facade, "Integration Facade", "Java/Spring", "Принимает команду от Delivery Routing; маршрутизирует pilot-партнёру через adapter или legacy‑путь.")
+Container(timeline, "Order Timeline Service", "Java/Spring", "Производная история заказов на событиях; client‑side и internal проекции статусов.")
+Container(read_model, "Analytical Store", "PostgreSQL / Target DB", "Изолированная read‑модель аналитики; наполняется событиями.")
+Container(legacy_adapter, "Legacy Event Adapter", "Java/Spring", "ACL: перевод legacy payload/status из Oracle; unmapped -> quarantine")
+
+
+Rel(customer, checkout, "Создание/обновление заказа", "sync")
+Rel(customer, payment, "Создание сессии оплаты", "sync")
+Rel(customer, delivery, "Выбор слота доставки", "async")
+Rel(customer, status, "Просмотр статуса", "async")
+
+Rel(checkout, promo, "Расчёт скидок (опционально)", "sync", "200 мс тайм-аут")
+Rel(checkout, payment, "Синхронный вызов", "sync")
+Rel(checkout, delivery, "Выбор маршрута и резервация слота", "sync")
+Rel(checkout, db, "Запись заказа, статусов, резервирования", "direct SQL")
+
+Rel(promo, db, "Атомарная запись промо-данных + Outbox", "sync")
+Rel(promo, outbox_relay, "Запись в Outbox для OrderDiscounted", "async")
+
+Rel(adapter, dotnet, "Нормализованный callback", "async")
+Rel(facade, adapter, "Протокольная изоляция и routing only", "async")
+Rel(delivery, facade, "Команда маршрутизации", "sync")
+
+Rel(outbox_relay, event_backbone, "Коммитированные записи", "async")
+Rel(db, outbox_relay, "Outbox рядом с владельцем state (CDC)", "atomic commit")
+Rel(outbox_relay, dotnet, "События экспорта заказов", "async")
+
+Rel(event_backbone, timeline, "Канонические события", "async")
+Rel(timeline, read_model, "Наполнение аналитической проекции", "async")
+Rel(analytics, read_model, "Переход отчётности на events", "read-only")
+
+Rel(support, status, "Коррекция статусов вручную", "async")
+Rel(partners, delivery, "Обмен статусами доставки", "async")
+
+Rel(db, legacy_adapter, "Committed записи (статусы, оплаты)", "direct SQL")
+Rel(legacy_adapter, event_backbone, "Канонические события из legacy", "async")
+Rel(legacy_adapter, read_model, "Backfill исторических данных", "async")
+Rel(legacy_adapter, timeline, "Обогащение истории статусами", "async")
+
+
+
+SHOW_LEGEND()
+@enduml
