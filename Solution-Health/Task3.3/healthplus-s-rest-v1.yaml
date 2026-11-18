@@ -1,0 +1,184 @@
+openapi: 3.2.0
+info:
+  title: Health+ Appointments API
+  version: 1.0.0
+  description: API для получения списка предстоящих записей пациента к врачу.
+servers:
+  - url: https://api.healthplus.ru/v1
+    description: Production
+paths:
+  /appointments:
+    get:
+      summary: Получить список предстоящих записей пациента
+      operationId: listUpcomingAppointments
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          description: Статус записи (по умолчанию upcoming)
+          required: false
+          schema:
+            type: string
+            enum: [upcoming, confirmed, cancelled]
+            default: upcoming
+        - name: limit
+          in: query
+          description: Количество записей на странице (по умолчанию 20, максимум 100)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          description: Смещение для пагинации (по умолчанию 0)
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Список предстоящих записей
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppointmentsListResponse'
+              examples:
+                success:
+                  value:
+                    data:
+                      - id: "appt_12345"
+                        patient_id: "patient_67890"
+                        doctor_id: "doc_111"
+                        doctor_name: "Иванов И.И."
+                        specialty: "Терапевт"
+                        appointment_datetime: "2025-12-15T09:30:00Z"
+                        status: "confirmed"
+                        location: "ул. Ленина, 10"
+                        lab_test_required: false
+                      - id: "appt_12346"
+                        patient_id: "patient_67890"
+                        doctor_id: "doc_222"
+                        doctor_name: "Петрова А.А."
+                        specialty: "Кардиолог"
+                        appointment_datetime: "2025-12-20T14:00:00Z"
+                        status: "confirmed"
+                        location: "пр. Мира, 45"
+                        lab_test_required: true
+                    pagination:
+                      limit: 20
+                      offset: 0
+                      total: 42
+                      has_more: true
+        '401':
+          description: Неавторизованный доступ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unauthorized:
+                  value:
+                    error:
+                      code: "UNAUTHORIZED"
+                      message: "Требуется аутентификация"
+                      details: null
+        '500':
+          description: Внутренняя ошибка сервера
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                server_error:
+                  value:
+                    error:
+                      code: "INTERNAL_ERROR"
+                      message: "Произошла внутренняя ошибка сервера"
+                      details: null
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    AppointmentsListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Appointment'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+      required: [data, pagination]
+    Appointment:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Уникальный идентификатор записи
+        patient_id:
+          type: string
+          description: Идентификатор пациента
+        doctor_id:
+          type: string
+          description: Идентификатор врача
+        doctor_name:
+          type: string
+          description: ФИО врача
+        specialty:
+          type: string
+          description: Специальность врача
+        appointment_datetime:
+          type: string
+          format: date-time
+          description: Дата и время приёма (UTC)
+        status:
+          type: string
+          enum: [upcoming, confirmed, cancelled]
+          description: Статус записи
+        location:
+          type: string
+          description: Адрес клиники
+        lab_test_required:
+          type: boolean
+          description: Требуется ли сдача анализов
+      required: [id, patient_id, doctor_id, doctor_name, specialty, appointment_datetime, status, location]
+    Pagination:
+      type: object
+      properties:
+        limit:
+          type: integer
+          description: Количество записей на странице
+        offset:
+          type: integer
+          description: Смещение
+        total:
+          type: integer
+          description: Общее количество записей
+        has_more:
+          type: boolean
+          description: Есть ли ещё записи
+      required: [limit, offset, total, has_more]
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              description: Код ошибки
+            message:
+              type: string
+              description: Сообщение об ошибке
+            details:
+              type: [string, null]
+              description: Дополнительные детали
+          required: [code, message]
+      required: [error]
