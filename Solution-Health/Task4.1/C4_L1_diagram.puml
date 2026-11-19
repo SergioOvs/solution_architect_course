@@ -1,0 +1,75 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
+
+SHOW_LEGEND()
+
+title C4 Level 1 - System Context: Снижение нагрузки на 1С: Полисы
+
+Person(patient, "Пациент", "Использует мобильное приложение")
+Person(doctor, "Врач", "Использует мобильное приложение")
+
+System(mobile_app, "Мобильное приложение", "Интерфейс для пациентов и врачей")
+System_Ext(legacy_1c, "1С: Полисы", "Legacy-система учёта полисов ДМС")
+
+System_Boundary(platform, "Платформа цифровых сервисов") {
+    System(gateway, "API Gateway", "Входная точка API")
+    System(read_model, "Policy Read Model Service", "Локальная проекция статусов полисов")
+    SystemDb(cache, "Cache (Redis)", "Кэширование данных полисов")
+}
+
+System_Boundary(integration, "Интеграционная платформа") {
+    System_Boundary(event_bus, "Event Bus (Kafka)") {
+        SystemQueue(kafka, "Kafka", "Шина событий")
+    }
+    System(cdc, "CDC в 1С", "Change Data Capture из 1С")
+}
+
+Rel(patient, mobile_app, "Использует приложение")
+Rel(doctor, mobile_app, "Использует мобильное приложение")
+Rel(mobile_app, gateway, "Запросы (HTTPS)", "JSON/HTTPS")
+Rel(gateway, read_model, "Запрос статуса полиса", "cache-first")
+Rel(read_model, cache, "Чтение/запись", "Redis protocol")
+Rel(read_model, kafka, "Подписка на события", "consumer")
+Rel(kafka, read_model, "Публикация событий", "producer")
+Rel(cdc, kafka, "Публикация изменений", "CDC events")
+Rel(legacy_1c, cdc, "Изменения данных", "DB triggers / log mining")
+Rel(gateway, legacy_1c, "Запись/периодическая сверка", "sync, fallback")
+
+
+note right of gateway
+  Вызов к 1С: Полисы
+  Retry: 3 попытки, exp backoff 1→2→5 сек, jitter
+  Circuit Breaker: 5 ошибок / >50% в окне 20, Open 30 сек, Half-Open 2 пробы
+  Timeout: connect 1 сек, read 2 сек
+end note
+
+note right of legacy_1c
+  Вызов к 1С: Полисы
+  Rate Limit: ≤ 40 RPS
+  Bulkhead: 20 одновременных соединений
+end note
+
+note right of gateway
+  Вызов к платёжному шлюзу
+  Retry: 2 попытки, exp backoff 2→5 сек, jitter
+  Circuit Breaker: 3 ошибки / >50% в окне 20, Open 60 сек, Half-Open 1 проба
+  Timeout: connect 2 сек, read 10 сек
+  Rate Limit: ≤ 100 RPS
+  Bulkhead: 10 одновременных соединений
+end note
+
+note top of gateway
+  Idempotency: Idempotency-Key на уровне API Gateway
+  предотвращает дублирование при повторных запросах
+end note
+
+note right of read_model
+  Fallback: при недоступности 1С — POLICY_UNKNOWN + ручная обработка
+  при наличии кэша — последний известный статус полиса
+end note
+
+note top of kafka
+  at-least-once доставка, идемпотентность по ключу сообщения
+end note
+
+@enduml

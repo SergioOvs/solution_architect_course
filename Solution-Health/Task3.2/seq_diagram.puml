@@ -1,0 +1,44 @@
+@startuml
+
+title Успешный сценарий: Запись к врачу с оплатой и резервированием анализов
+
+actor "Мобильное приложение" as MobileApp
+participant "API Gateway" as Gateway
+participant "Saga Orchestrator" as Orchestrator
+participant "Policy Service (ACL)" as PolicyService
+participant "1С: Полисы" as PolicySystem
+participant "Inventory Service" as InventoryService
+participant "Платёжный шлюз" as PaymentGateway
+participant "LIS Adapter (ACL)" as LISAdapter
+participant "LIS (Лабораторная)" as LIS
+
+MobileApp -> Gateway: POST /appointments
+activate Gateway
+    Gateway -> Orchestrator: CreateAppointment (Idempotency-Key)
+    activate Orchestrator
+        Orchestrator -> PolicyService: CheckPolicy (patient_id, policy_number)
+        activate PolicyService
+            PolicyService -> PolicySystem: SOAP/XML запрос
+            PolicySystem --> PolicyService: Подтверждение
+            PolicyService --> Orchestrator: PolicyChecked
+        deactivate PolicyService
+        Orchestrator -> InventoryService: ReserveSlot (doctor_id, datetime)
+        activate InventoryService
+            InventoryService --> Orchestrator: SlotReserved
+        deactivate InventoryService
+        Orchestrator -> PaymentGateway: ProcessPayment (amount, patient_id)
+        activate PaymentGateway
+            PaymentGateway --> Orchestrator: PaymentConfirmed
+        deactivate PaymentGateway
+        Orchestrator -> LISAdapter: ReserveLabTest (patient_id, test_type)
+        activate LISAdapter
+            LISAdapter -> LIS: HTTPS запрос
+            LIS --> LISAdapter: Подтверждение
+            LISAdapter --> Orchestrator: LabReserved
+        deactivate LISAdapter
+        Orchestrator -> Gateway: AppointmentCreated (201)
+    deactivate Orchestrator
+    Gateway --> MobileApp: 201 Created + appointment_id
+deactivate Gateway
+
+@enduml

@@ -1,0 +1,72 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
+
+title Целевая архитектура "Здоровья+" (TO-BE)
+
+System_Boundary(c, "Здоровье+") {
+
+  ' Определения ролей (акторов):
+  Person(patient, "Пациент", "Записывается на приём")
+  Person(doctor, "Врач", "Управляет расписанием,\nпросматривает анализы пациентов")
+  Person(lab, "Лаборант", "Просматривает результаты анализов\nв LIS")
+  Person(admin, "Администратор", "Управление расписанием,\nпроверка полисов,\nадминистративные задачи в CRM")
+
+  System_Boundary(mobile, "Мобильное приложение", "") {
+    System(mobile_app, "Мобильное приложение", "Запись, оплата, результаты анализов,\nуведомления")
+  }
+
+  ' Внутренние микросервисы
+  System(schedule, "Расписание", "Управление слотами, запись пациентов\nJava, PostgreSQL")
+  System(crm, "CRM", "Карточки пациентов, контактная информация,\nрезультаты анализов\nJava, REST")
+  System(notification, "Уведомления", "Push, SMS, Email\nчерез внешние провайдеры")
+
+  ' Legacy-системы и их ACL
+  System(polisacl, "Полис Adapter (ACL)", "Преобразует JSON → SOAP/XML,\nфиксирует контракт")
+  System(lisadapter, "Lab Event Transformer (ACL)", "Преобразует lab_results_raw → crm_lab_results")
+  System(lis, "LIS (Лабораторная)", "Хранение результатов анализов,\nавтоматический приём данных\nSOAP / FTP → только REST API")
+  System(polis, "1С: Полисы", "Проверка полисов ДМС,\nприкрепление полиса к пациенту\nHTTP-шлюз → REST API")
+
+  ' Платёжный шлюз — внешний сервис
+  System(payment, "Платёжный шлюз", "Проведение онлайн-платежей\nВнешний поставщик, gRPC")
+
+  ' Новые компоненты
+  System(api_gateway, "API Gateway", "Централизованный вход,\nrate limiting, auth, idempotency")
+  System(auth, "Auth Service", "Единая аутентификация и авторизация\nOAuth/SAML")
+
+  System(orchestrator, "Saga Orchestrator", "Координирует процесс записи,\nуправляет состоянием транзакции")
+  System(kafka, "Event Broker (Kafka)", "Топики appointment_commands,\nappointment_events, lab_results")
+
+  Rel(mobile_app, api_gateway, "REST API", "Запрос данных и действий")
+  Rel(api_gateway, auth, "REST API", "Аутентификация и авторизация")
+
+  ' Запись пациента теперь управляется через Parallel Saga
+  Rel(mobile_app, orchestrator, "REST / Command", "Инициировать запись (CreateAppointment)")
+
+  ' Оркестратор запускает синхронные вызовы для компенсируемых шагов
+  Rel(orchestrator, polisacl, "gRPC", "Проверка полиса (синхронно,\nat-least-once)\nidempotent")
+  Rel(orchestrator, schedule, "gRPC", "Резервировать слот (синхронно,\nat-least-once)\nidempotent")
+  Rel(orchestrator, payment, "gRPC", "Оплата (необратимый шаг,\nsynсхонно, at-most-once)")
+
+  ' Оркестратор публикует события в Kafka
+  Rel(orchestrator, kafka, "Publish Commands", "Отправляет команды в топик\nappointment_commands")
+
+  ' Сервисы подписываются на события
+  Rel(kafka, schedule, "Consume Command", "Подписка на команду CreateAppointment")
+  Rel(kafka, notification, "Consume Event", "Подписка на событие AppointmentCreated")
+  Rel(kafka, lisadapter, "Consume Event", "Подписка на event lab_results_raw")
+
+  ' Внутренняя интеграция между legacy-системами и новыми сервисами
+  Rel(lis, lisadapter, "REST API", "Синхронизация данных о результатах\ncrm_lab_results")
+  Rel(polisacl, polis, "REST API", "Прикрепление полиса к пациенту")
+  Rel(polisacl, crm, "REST API", "Передача данных о полисах")
+  Rel(lisadapter, crm, "Publishes to Kafka", "Публикует event crm_lab_results")
+
+  ' Actor interactions
+  Rel(patient, mobile_app, "Push / SMS / REST", "Запись, оплата, уведомления")
+  Rel(doctor, crm, "REST", "Просмотр анализов, расписание")
+  Rel(lab, lis, "UI / API", "Просмотр результатов анализов")
+  Rel(admin, crm, "REST", "Управление расписанием, полисами,\nадминистративные задачи")
+
+}
+
+@enduml
