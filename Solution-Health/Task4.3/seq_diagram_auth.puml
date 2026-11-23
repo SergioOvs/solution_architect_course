@@ -1,0 +1,85 @@
+@startuml
+!theme plain
+title Sequence: Аутентификация (OAuth 2.0 + PKCE) с разделением External Gateway и Mobile API/BFF
+
+actor "Пользователь" as User
+participant "Мобильное\nприложение" as App
+participant "Сервер\nавторизации" as AS
+participant "External API\nGateway" as ExtGateway
+participant "Mobile API /\nBFF" as MobileBFF
+
+== 1. Инициация входа ==
+App -> App: Сгенерировать code_verifier\nи code_challenge (SHA256)
+App -> App: Получить device_id из Secure Enclave
+App -> AS: Открыть системный браузер\nGET /authorize?...\n&code_challenge=...
+
+== 2. Аутентификация пользователя ==
+AS -> User: Форма входа / биометрия / SSO
+User -> AS: Учётные данные
+alt Требуется MFA
+    AS -> User: Запрос MFA (Push/OTP)
+    User -> AS: Подтверждение / код
+    AS -> AS: Верифицировать MFA
+end
+
+== 3. Возврат authorization_code ==
+AS --> App: HTTP 302\nредирект на app://callback?code=AUTHORIZATION_CODE
+
+== 4. Обмен кода на токены (backchannel) ==
+App -> AS: POST /token\ncode=AUTHORIZATION_CODE\ncode_verifier=VERIFIER\nclient_id=mobile\ngrant_type=authorization_code\ndevice_id=DEVICE_ID
+alt Ошибка PKCE или Device Binding
+    AS --> App: HTTP 400 invalid_grant
+    App --> App: Показать ошибку входа
+else Успешная валидация
+    AS -> AS: Инвалидация старого refresh-токена (если есть)
+    AS -> AS: Подписать JWT (RS256)\n// claims: sub, client_id, scope, iat, exp (без PHI)
+    AS -> AS: Выдать новый id_token
+    AS --> App: HTTP 200\n{\n  access_token: JWT\n  refresh_token: opaque\n  id_token: JWT\n  token_type: Bearer\n  expires_in: 600\n}
+    App -> App: Сохранить токены в Keychain/Keystore
+end
+
+== 5. Вызов API с access_token ==
+App -> ExtGateway: GET /api/v1/doctors\nAuthorization: Bearer <access_token>
+ExtGateway -> ExtGateway: Проверить подпись JWT (RS256)\nпроверить iss, aud, exp, scope
+alt Токен валиден
+    ExtGateway -> ExtGateway: Применить rate limit (IP/installationId), WAF
+    ExtGateway -> ExtGateway: Вернуть X-RateLimit-* заголовки
+    ExtGateway -> MobileBFF: Forward request (внутренний TLS/mTLS)
+    MobileBFF -> MobileBFF: Извлечь sub, проверить object-level auth\n(resource.owner_id == sub)
+    MobileBFF -> MobileBFF: Применить rate limit (sub), idempotency
+    MobileBFF -> MobileBFF: Маршрутизация к внутренним сервисам\n(1С, Расписание)
+    MobileBFF --> ExtGateway: HTTP 200 (данные)
+    ExtGateway --> App: HTTP 200 (данные)
+else Токен истёк (exp)
+    ExtGateway --> App: HTTP 401 Unauthorized
+    alt Есть валидный refresh_token
+        App -> AS: POST /token\ngrant_type=refresh_token\nrefresh_token=REFRESH\ndevice_id=DEVICE_ID
+        AS -> AS: Проверить device binding\nинвалидация старого refresh-токена
+        AS -> AS: Подписать новый JWT\nвыдать новый id_token
+        AS --> App: HTTP 200\n{new_access_token, new_refresh_token, new_id_token}
+        App -> App: Сохранить токены в Keychain/Keystore
+        App -> ExtGateway: GET /api/v1/doctors\nAuthorization: Bearer <new_access_token>
+        ExtGateway -> ExtGateway: Проверить подпись JWT
+        ExtGateway -> MobileBFF: Forward request
+        MobileBFF --> ExtGateway: HTTP 200 (данные)
+        ExtGateway --> App: HTTP 200 (данные)
+    else Refresh_token отозван/просрочен/ошибка
+        AS --> App: HTTP 400 invalid_grant
+        App -> App: Очистить Keychain\nперейти к экрану входа
+    end
+end
+
+== 6. Выход / Отзыв токенов ==
+App -> AS: POST /revoke\ntoken=ACCESS_TOKEN
+App -> AS: POST /revoke\ntoken=REFRESH
+AS --> App: HTTP 200
+App -> App: Очистить Keychain/Keystore
+
+@enduml
+
+note right of ExtGateway and MobileBFF
+  <b>mTLS vs JWT</b>
+  mTLS (L4): проверка подлинности сервиса через сертификат.
+  JWT (L7): проверка прав (scope) и авторизация.
+  В защищённой архитектуре они дополняют друг друга.
+end note

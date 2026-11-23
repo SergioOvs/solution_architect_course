@@ -1,0 +1,145 @@
+@startuml lab_results_delivery_flow
+
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontName "Helvetica"
+skinparam ArrowColor #185FA5
+skinparam shadowing false
+
+skinparam activity {
+    BackgroundColor #E6F1FB
+    BorderColor #185FA5
+    FontColor #042C53
+    DiamondBackgroundColor #FAEEDA
+    DiamondBorderColor #854F0B
+    DiamondFontColor #412402
+}
+
+title Поток данных: от готовности анализа в LIS до CRM и Мобильного приложения
+
+|LIS (Лабораторная)|
+start
+:Лаборант завершает анализ;
+:Формируется пакет данных
+(analysis_id, patient_id, значения);
+note right
+	Решение проблемы SD-005, ARCH-PRB-1
+	отказ от FTP и пакетной обработки)
+end note
+
+|#F1EFE8|Lab Event Transformer (ACL)|
+:Подписка на событие
+LabResultAvailable (lab_results_raw);
+:Присвоение ключа дедупликации
+dedup_key = analysis_id + версия;
+note right
+	Решение INT-008
+	(исключение дублей)
+end note
+:Трансформация (LIS формат -> доменный);
+:Транзакция:
+сохранить доменную модель
++ запись в Outbox-таблицу;
+note right
+	Решение INT-002, SD-005
+	(Transactional Outbox — гарантия доставки)
+end note
+
+:Outbox-релей читает
+неотправленные события;
+while (Публикация в Kafka успешна?) is (нет)
+  :Повтор с экспоненциальным backoff
+  (событие остаётся в Outbox);
+  note right
+	Гарантия at-least-once
+	событие не теряется при сбое
+  end note
+endwhile (да)
+:Пометить событие
+как отправленное;
+
+|#FAECE7|Kafka (Event Broker)|
+:Событие LabResultAvailable
+в топик lab_results
+(партиция по patient_id);
+note right
+	Решение ARCH-PRB-1
+	(буферизация пиков 50k+ пользователей)
+end note
+
+fork
+  |#E1F5EE|CRM (консьюмер)|
+  :Получить событие из lab_results;
+  if (dedup_key
+уже обработан?) then (да)
+    :Игнорировать дубль;
+    stop
+  else (нет)
+    :Обновить карточку пациента;
+    :Сохранить результат в БД;
+    :Зафиксировать dedup_key
+    как обработанный;
+    stop
+  endif
+fork again
+  |#EEEDFE|Сервис доставки (Push Service)|
+  :Получить событие из lab_results;
+  if (dedup_key
+уже обработан?) then (да)
+    :Игнорировать дубль;
+    stop
+  else (нет)
+    :Обновить read-модель
+    (кэш результатов);
+    :Отправить push-уведомление
+    "Анализы готовы";
+    :Зафиксировать dedup_key;
+    stop
+  endif
+end fork
+
+|#EEEDFE|Мобильное приложение|
+start
+:Пациент получает push
+или открывает экран анализов;
+:Запрос к API (BFF/GraphQL);
+:Чтение read-модели
+(отклик < 1 с);
+note right
+	Решение SD-005
+	(результат за секунды, не за часы)
+end note
+:Результаты отображаются
+в реальном времени;
+stop
+
+' === DLQ и Replay ===
+|#FFCCCC|DLQ и Replay|
+:LIS DLQ
+(alert + replay);
+note right
+	Решение INT-007, ARCH-PRB-1
+	(наблюдаемость и восстановление)
+end note
+
+:Kafka DLQ
+(alert + replay);
+note right
+	Решение ARCH-PRB-1
+	(гарантированная доставка)
+end note
+
+:CRM DLQ
+(alert + replay);
+note right
+	Решение ARCH-PRB-1
+	(независимая обработка)
+end note
+
+:Push DLQ
+(alert + replay);
+note right
+	Решение ARCH-PRB-1
+	(независимая обработка)
+end note
+
+@enduml
